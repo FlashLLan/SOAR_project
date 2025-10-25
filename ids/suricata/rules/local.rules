@@ -1,0 +1,31 @@
+# 1) SSH brute force (SYN threshold)
+alert tcp any any -> any 22 (msg:"SSH brute force attempt (SYN threshold)"; flags:S; threshold:type threshold, track by_src, count 5, seconds 60; classtype:attempted-recon; priority:2; sid:9001001; rev:7;)
+
+# 2) SQLi: quoted OR 1=1 or UNION SELECT in URI 
+alert http any any -> any any (msg:"SQLi HTTP URI - '' OR 1=1"; flow:to_server,established; http.uri; pcre:"/\b'?\s*OR\s+1\s*=\s*1\b/i"; classtype:web-application-attack; priority:2; sid:9001002; rev:7;)
+alert http any any -> any any (msg:"SQLi HTTP URI - UNION SELECT"; flow:to_server,established; http.uri; pcre:"/\bunion\s+select\b/i"; classtype:web-application-attack; priority:2; sid:9001003; rev:7;)
+
+# 3) Command injection in POST body
+alert http any any -> any any (msg:"CMDi wget in HTTP body"; flow:to_server,established; content:"|3b|wget"; http_client_body; nocase; classtype:web-application-attack; priority:2; sid:9001004; rev:14;)
+
+alert http any any -> any any (msg:"CMDi curl in HTTP body"; flow:to_server,established; content:"|3b|curl"; http_client_body; nocase; classtype:web-application-attack; priority:2; sid:9001005; rev:14;)
+
+# 4) Directory traversal: common ../ patterns in URI
+alert http any any -> any any (msg:"Directory traversal attempt in URI"; flow:to_server,established; http.uri; pcre:"/\.\.\/\.\.\/|\.\.\/etc\/passwd/i"; classtype:web-application-attack; priority:2; sid:9001006; rev:7;)
+
+# 5) XSS: look for <script> in URI or query string (URI decoded)
+alert http any any -> any any (msg:"XSS <script> tag in URI"; flow:to_server,established; http.uri; pcre:"/<\s*script\b[^>]*>/i"; classtype:web-application-attack; priority:3; sid:9001007; rev:7;)
+
+# 6) Scanner User-Agents
+alert http any any -> any any (msg:"Scanner UA: Nmap Scripting Engine"; flow:to_server,established; http.header; content:"User-Agent|3a|"; nocase; http.header; content:"Nmap Scripting Engine"; nocase; classtype:attempted-recon; priority:3; sid:9001008; rev:6;)
+alert http any any -> any any (msg:"Scanner UA: Nikto"; flow:to_server,established; http.header; content:"User-Agent|3a|"; nocase; http.header; content:"Nikto"; nocase; classtype:attempted-recon; priority:3; sid:9001009; rev:6;)
+
+# 7) Custom DNS trigger
+alert dns any any -> any any (msg:"DNS bad.domain.test query"; dns.query; content:"bad.domain.test"; nocase; classtype:bad-unknown; priority:3; sid:9001010; rev:6;)
+
+# 8) SYN spike heuristic
+alert tcp any any -> any any (msg:"DoS SYN spike to destination (lab)"; flags:S; threshold:type both, track by_dst, count 6, seconds 10; classtype:attempted-dos; priority:2; sid:9001011; rev:8;)
+
+# 9) ICMP flood
+alert icmp any any -> any any (msg:"ICMP echo-request flood (possible ping flood)"; itype:8; threshold:type both, track by_src, count 6, seconds 10; classtype:attempted-dos; priority:2; sid:9002001; rev:1;)
+
