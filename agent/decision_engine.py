@@ -1,7 +1,10 @@
 import time
+import yaml
 from collector import db
 from playbooks.playbooks import run_playbooks
 
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
 
 DB_PATH = "/root/soar-agent/alerts.db"   
 
@@ -33,7 +36,7 @@ def main_loop():
         processed = process_batch(conn)
 
         if processed == 0:
-            # Nothing to do - relax to reduce CPU load
+            # Nothing to do → relax to reduce CPU load
             time.sleep(2)
         else:
             # If many alerts are incoming, process again quickly

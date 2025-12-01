@@ -33,31 +33,27 @@ def _record_action(conn, src_ip, reason, sid, blocked_until, status="blocked"):
 
 
 # --- Playbooks -------------------------------------------------------------
-
 def handle_ssh_bruteforce(conn, alert_row):
     """
     Block SSH brute force attempts.
     Triggered by Suricata SIDs 9001001 (alert) / 9101001 (drop).
     """
-    sid = alert_row["signature_id"]
+    sid = int(alert_row["signature_id"])
     if sid not in (9001001, 9101001):
-        return None  # not my alert
+        return None
 
     src_ip = alert_row["src_ip"]
-
-    # Decide: block this IP on nftables
     nft.block_ip(src_ip, SSH_BLOCK_SEC)
 
-    blocked_until_dt = datetime.utcnow() + timedelta(seconds=SSH_BLOCK_SEC)
-    blocked_until = blocked_until_dt.isoformat()
+    blocked_until = (datetime.utcnow() + timedelta(seconds=SSH_BLOCK_SEC)).isoformat()
 
-    # Mark alert as processed
     db.mark_alert_processed(
         conn,
         alert_id=alert_row["id"],
         decision=f"blocked ssh brute-force from {src_ip}",
         blocked_until=blocked_until,
     )
+
 
     # Log action
     _record_action(
@@ -76,16 +72,14 @@ def handle_icmp_flood(conn, alert_row):
     Block ICMP flood.
     Triggered by SID 9002001 (alert) / 9102001 (drop).
     """
-    sid = alert_row["signature_id"]
+    sid = int(alert_row["signature_id"])
     if sid not in (9002001, 9102001):
         return None
 
     src_ip = alert_row["src_ip"]
-
     nft.block_ip(src_ip, ICMP_BLOCK_SEC)
 
-    blocked_until_dt = datetime.utcnow() + timedelta(seconds=ICMP_BLOCK_SEC)
-    blocked_until = blocked_until_dt.isoformat()
+    blocked_until = (datetime.utcnow() + timedelta(seconds=ICMP_BLOCK_SEC)).isoformat()
 
     db.mark_alert_processed(
         conn,
@@ -110,16 +104,14 @@ def handle_syn_spike(conn, alert_row):
     Block DoS SYN spike.
     Triggered by SID 9001011 (alert) / 9101011 (drop).
     """
-    sid = alert_row["signature_id"]
+    sid = int(alert_row["signature_id"])
     if sid not in (9001011, 9101011):
         return None
 
     src_ip = alert_row["src_ip"]
-
     nft.block_ip(src_ip, SYN_BLOCK_SEC)
 
-    blocked_until_dt = datetime.utcnow() + timedelta(seconds=SYN_BLOCK_SEC)
-    blocked_until = blocked_until_dt.isoformat()
+    blocked_until = (datetime.utcnow() + timedelta(seconds=SYN_BLOCK_SEC)).isoformat()
 
     db.mark_alert_processed(
         conn,
@@ -127,7 +119,6 @@ def handle_syn_spike(conn, alert_row):
         decision=f"blocked syn spike from {src_ip}",
         blocked_until=blocked_until,
     )
-
     _record_action(
         conn,
         src_ip=src_ip,
@@ -179,7 +170,7 @@ PLAYBOOKS = (
     handle_ssh_bruteforce,
     handle_icmp_flood,
     handle_syn_spike,
-    handle_any_ip_alert,
+    #handle_any_ip_alert,
 )
 
 
