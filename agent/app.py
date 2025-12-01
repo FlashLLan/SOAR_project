@@ -31,7 +31,7 @@ def health():
 @app.route("/alerts")
 def alerts():
     rows = get_last_alerts(conn, limit=50)
-    return jsonify(rows)
+    return jsonify([dict(r) for r in rows])
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001)
