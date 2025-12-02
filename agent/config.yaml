@@ -1,0 +1,2 @@
+eve_log_path: "/var/log/suricata/eve.json"
+database_path: "/root/soar-agent/alerts.db"
