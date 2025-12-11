@@ -252,14 +252,59 @@ def _insert_rollback(conn, alert_id: Optional[int], src_ip: str, reason: str):
     )
     conn.commit()
 
+def _show_rollbacks(conn, limit: int):
+    rows = conn.execute(
+        """
+        SELECT
+            r.id,
+            r.created_at,
+            r.src_ip,
+            r.reason,
+            r.alert_id,
+            a.signature_id,
+            a.signature
+        FROM rollbacks r
+        LEFT JOIN alerts a ON a.id = r.alert_id
+        ORDER BY r.id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    if not rows:
+        print("No rollbacks recorded yet.")
+        return
+
+    for r in rows:
+        print(
+            f"[{r['id']}] {r['created_at']} src={r['src_ip']} "
+            f"alert_id={r['alert_id'] or '-'} "
+            f"sig_id={r['signature_id'] or '-'}"
+        )
+
+        reason = r["reason"] or ""
+        if reason:
+            print(f"    reason: {reason}")
+
+        sig = r["signature"] or ""
+        if sig:
+            sig = textwrap.shorten(sig, width=100, placeholder="…")
+            print(f"    alert:  {sig}")
+
 
 def cmd_rollback(args):
+    conn = get_db()
+
+    # 1) If --last is given, just show history and exit
+    if args.last:
+        _show_rollbacks(conn, args.last)
+        return
+
+    # 2) Normal rollback path: require exactly one of --ip / --alert-id
     if bool(args.ip) == bool(args.alert_id):
         raise SystemExit(
             "You must specify exactly one of --ip or --alert-id."
         )
-
-    conn = get_db()
 
     if args.alert_id:
         # find src_ip for that alert
@@ -285,6 +330,7 @@ def cmd_rollback(args):
     # log to rollbacks table
     _insert_rollback(conn, alert_id, src_ip, args.reason)
     print("Rollback logged to rollbacks table.")
+
 
 # ---------- ifaces subcommand ----------
 
@@ -449,6 +495,12 @@ def build_parser():
         help="reason / comment to store in DB",
         default="",
     )
+    p_rb.add_argument(
+        "--last",
+        type=int,
+        help="show last N rollbacks instead of performing a new rollback",
+    )
+
     p_rb.set_defaults(func=cmd_rollback)
 
     # ifaces
