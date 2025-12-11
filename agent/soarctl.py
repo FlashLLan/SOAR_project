@@ -7,8 +7,11 @@ import subprocess
 import sys
 from typing import Optional
 
-import nft 
+import nft
 
+
+PROJECT_ROOT = "/root/soar-agent"
+ENGINE_SCRIPT = os.path.join(PROJECT_ROOT, "decision_engine.py")
 
 DB_PATH = os.environ.get("SOAR_DB_PATH", "/root/soar-agent/alerts.db")
 
@@ -43,11 +46,9 @@ def ensure_schema(conn):
 
 def cmd_engine(args):
     if args.action == "status":
-        # very simple: check if decision_engine.py is running
         try:
             out = subprocess.check_output(
-                ["pgrep", "-af", "decision_engine.py"],
-                text=True,
+                ["pgrep", "-af", "decision_engine.py"], text=True
             ).strip()
         except subprocess.CalledProcessError:
             out = ""
@@ -59,15 +60,46 @@ def cmd_engine(args):
             print(out)
 
     elif args.action == "start":
-        # lightweight stub – you can wire this to systemd later
-        print(
-            "Engine start is not fully wired.\n"
-            "Run it manually for now, e.g.:"
-        )
-        print("  python3 /path/to/decision_engine.py &")
+        engine_path = "/root/soar-agent/decision_engine.py"
+
+        if args.silent:
+            # background mode
+            print("Starting decision engine in background mode…")
+            subprocess.Popen(
+                ["python3", engine_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            print("Engine started (silent).")
+        else:
+            # foreground mode
+            print("Starting decision engine (foreground mode)…")
+            subprocess.call(["python3", engine_path])
+
+
+    elif args.action == "stop":
+        # find running engine process
+        try:
+            out = subprocess.check_output(
+                ["pgrep", "-f", "decision_engine.py"], text=True
+            ).strip()
+        except subprocess.CalledProcessError:
+            out = ""
+
+        if not out:
+            print("decision_engine.py is NOT running")
+            return
+
+        # pgrep may return multiple PIDs
+        pids = out.splitlines()
+        for pid in pids:
+            print(f"Stopping decision engine process {pid}…")
+            subprocess.call(["kill", pid])
+
+        print("Engine stopped.")
+
     else:
         raise SystemExit("Unknown engine action")
-
 
 # ---------- alerts subcommand ----------
 
@@ -146,9 +178,14 @@ def cmd_blocklist(args):
         print(f"Unblocking {args.ip} from nftables blocklist4…")
         nft.unblock_ip(args.ip)
         print("Done.")
+
+    elif args.action == "clear":
+        print("Flushing all entries from nftables blocklist4…")
+        nft.clear_blocklist()
+        print("Done.")
+
     else:
         raise SystemExit("Unknown blocklist action")
-
 
 # ---------- rollback subcommand ----------
 
@@ -212,10 +249,21 @@ def build_parser():
         "status", help="show if decision_engine.py is running"
     )
     p_engine_status.set_defaults(func=cmd_engine)
+    
     p_engine_start = p_engine_sub.add_parser(
         "start", help="start decision engine (stub)"
     )
+    p_engine_start.add_argument(
+        "--silent",
+        action="store_true",
+        help="run engine in background (no output)"
+    )
     p_engine_start.set_defaults(func=cmd_engine)
+
+    p_engine_stop = p_engine_sub.add_parser(
+        "stop", help="stop the running decision engine"
+    )
+    p_engine_stop.set_defaults(func=cmd_engine)
 
     # alerts
     p_alerts = subparsers.add_parser(
@@ -270,6 +318,11 @@ def build_parser():
     )
     p_block_remove.add_argument("ip", help="source IP to unblock")
     p_block_remove.set_defaults(func=cmd_blocklist)
+
+    p_block_clear = p_block_sub.add_parser(
+        "clear", help="flush all entries from blocklist4"
+    )
+    p_block_clear.set_defaults(func=cmd_blocklist)
 
     # rollback
     p_rb = subparsers.add_parser(

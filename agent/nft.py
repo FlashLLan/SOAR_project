@@ -112,3 +112,21 @@ def list_blocklist(raw: bool = False):
         elements.append({"ip": ip, "timeout": timeout, "expires": expires})
 
     return elements
+
+def clear_blocklist() -> None:
+    """
+    Remove all elements from the blocklist set.
+    Equivalent to: sudo nft flush set inet firewall blocklist4
+    """
+    cmd = (
+        f"flush set {NFT_SET_FAMILY} {NFT_SET_TABLE} {NFT_SET_NAME}"
+    )
+    print("[nft] running:", f"sudo nft {cmd}")
+    try:
+        _run_nft(cmd)
+    except RuntimeError as e:
+        # If set doesn't exist or is already empty, ignore
+        if "No such file or directory" in str(e):
+            print("[nft] blocklist set empty or missing, ignoring.")
+        else:
+            raise
