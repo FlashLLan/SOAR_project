@@ -1,13 +1,14 @@
-# collector/db.py
 import sqlite3
 from pathlib import Path
 from datetime import datetime
 
 def get_db(db_path):
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row   # get dict-like rows
+    # Add timeout and enable WAL for better read/write concurrency
+    conn = sqlite3.connect(db_path, timeout=5.0, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
-
 
 def init_db(db_path):
     db_exists = Path(db_path).exists()
@@ -80,9 +81,15 @@ def insert_alert(conn, alert):
 
 def get_new_alerts(conn, limit=100):
     """Return alerts that were not processed yet."""
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute(
-        "SELECT * FROM alerts WHERE status='new' ORDER BY id ASC LIMIT ?",
+        """
+        SELECT * FROM alerts
+        WHERE status='new'
+          AND (processed_at IS NULL OR processed_at = '')
+        ORDER BY id ASC LIMIT ?
+        """,
         (limit,),
     )
     return c.fetchall()
@@ -92,14 +99,17 @@ def mark_alert_processed(conn, alert_id, decision, blocked_until=None):
     """Mark alert as processed and store decision."""
     c = conn.cursor()
     now = datetime.utcnow().isoformat()
-    c.execute("""
+    c.execute(
+        """
         UPDATE alerts
         SET status='processed',
             decision=?,
             blocked_until=?,
             processed_at=?
         WHERE id=?
-    """, (decision, blocked_until, now, alert_id))
+        """,
+        (decision, blocked_until, now, alert_id),
+    )
     conn.commit()
 
 def get_last_alerts(conn, limit=50):

@@ -1,0 +1,7 @@
+
+secrets/
+*.log
+*.pcap
+*.pcapng
+*.sqlite
+firewall/nft/runtime-*.nft
