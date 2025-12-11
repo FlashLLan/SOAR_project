@@ -5,6 +5,7 @@ import sqlite3
 import textwrap
 import subprocess
 import sys
+import re
 from typing import Optional
 
 import nft
@@ -14,6 +15,8 @@ PROJECT_ROOT = "/root/soar-agent"
 ENGINE_SCRIPT = os.path.join(PROJECT_ROOT, "decision_engine.py")
 
 DB_PATH = os.environ.get("SOAR_DB_PATH", "/root/soar-agent/alerts.db")
+
+NFT_CONF_PATH = os.environ.get("SOAR_NFT_PATH", "/etc/nftables.conf")
 
 
 # ---------- DB helpers ----------
@@ -40,6 +43,59 @@ def ensure_schema(conn):
         """
     )
     conn.commit()
+
+# ---------- nftables interface helpers ----------
+
+IFACE_DEFINES = ["WAN", "LAN", "DMZ"]
+
+
+def _read_nft_conf(path: str) -> str:
+    with open(path, "r") as f:
+        return f.read()
+
+
+def _write_nft_conf(path: str, text: str) -> None:
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def _parse_ifaces(text: str):
+    """
+    Return intrefaces like {'WAN': 'eth-wan', 'LAN': 'eth-lan', 'DMZ': 'eth-dmz'}
+    based on 'define NAME = "iface"' lines.
+    """
+    mapping = {}
+    for name in IFACE_DEFINES:
+        m = re.search(rf'^define\s+{name}\s*=\s*"([^"]+)"', text, re.M)
+        if m:
+            mapping[name] = m.group(1)
+    return mapping
+
+
+def _set_iface(text: str, name: str, value: str) -> str:
+    """
+    Replace the define line for NAME with the new value.
+    If the define is missing, prepend it at the top.
+    """
+    pattern = rf'^(define\s+{name}\s*=\s*")([^"]+)(".*)$'
+
+    def repl(m):
+        return m.group(1) + value + m.group(3)
+
+    new_text, n = re.subn(pattern, repl, text, flags=re.M)
+    if n == 0:
+        # If not found, insert near the top (after 'flush ruleset' if present)
+        lines = new_text.splitlines()
+        inserted = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith("define "):
+                lines.insert(i, f'define {name} = "{value}"')
+                inserted = True
+                break
+        if not inserted:
+            lines.insert(0, f'define {name} = "{value}"')
+        new_text = "\n".join(lines) + "\n"
+    return new_text
 
 
 # ---------- engine subcommand ----------
@@ -230,6 +286,57 @@ def cmd_rollback(args):
     _insert_rollback(conn, alert_id, src_ip, args.reason)
     print("Rollback logged to rollbacks table.")
 
+# ---------- ifaces subcommand ----------
+
+def cmd_ifaces(args):
+    conf_path = args.conf or NFT_CONF_PATH
+
+    try:
+        text = _read_nft_conf(conf_path)
+    except FileNotFoundError:
+        raise SystemExit(f"nftables config not found at {conf_path}")
+
+    if args.action == "show":
+        mapping = _parse_ifaces(text)
+        if not mapping:
+            print(f"No define WAN/LAN/DMZ lines found in {conf_path}")
+            return
+
+        print(f"Interface defines in {conf_path}:")
+        for name in IFACE_DEFINES:
+            val = mapping.get(name, "<missing>")
+            print(f"  {name} = {val}")
+        return
+
+    elif args.action == "set":
+        updated = text
+        changes = []
+
+        if args.wan:
+            updated = _set_iface(updated, "WAN", args.wan)
+            changes.append(f"WAN={args.wan}")
+        if args.lan:
+            updated = _set_iface(updated, "LAN", args.lan)
+            changes.append(f"LAN={args.lan}")
+        if args.dmz:
+            updated = _set_iface(updated, "DMZ", args.dmz)
+            changes.append(f"DMZ={args.dmz}")
+
+        if not changes:
+            print("Nothing to change: specify at least one of --wan/--lan/--dmz.")
+            return
+
+        _write_nft_conf(conf_path, updated)
+        print(f"Updated nftables interface defines in {conf_path}:")
+        for c in changes:
+            print(f"  {c}")
+        print("\nRemember to reload nftables, for example:")
+        print(f"  sudo nft -f {conf_path}")
+        return
+
+    else:
+        raise SystemExit("Unknown ifaces action")
+
 
 # ---------- parse wiring ----------
 
@@ -343,6 +450,30 @@ def build_parser():
         default="",
     )
     p_rb.set_defaults(func=cmd_rollback)
+
+    # ifaces
+    p_if = subparsers.add_parser(
+        "ifaces", help="view/update nftables interface defines (WAN/LAN/DMZ)"
+    )
+    p_if.add_argument(
+        "--conf",
+        default=NFT_CONF_PATH,
+        help=f"path to nftables.conf (default: {NFT_CONF_PATH})",
+    )
+    p_if_sub = p_if.add_subparsers(dest="action", required=True)
+
+    p_if_show = p_if_sub.add_parser(
+        "show", help="show current interface names"
+    )
+    p_if_show.set_defaults(func=cmd_ifaces)
+
+    p_if_set = p_if_sub.add_parser(
+        "set", help="set interface names in nftables.conf"
+    )
+    p_if_set.add_argument("--wan", help="interface name for WAN")
+    p_if_set.add_argument("--lan", help="interface name for LAN")
+    p_if_set.add_argument("--dmz", help="interface name for DMZ")
+    p_if_set.set_defaults(func=cmd_ifaces)
 
     return parser
 
