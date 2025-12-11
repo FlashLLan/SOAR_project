@@ -51,7 +51,8 @@ def block_ip(src_ip: str, duration_seconds: int = 120) -> None:
 def unblock_ip(src_ip: str) -> None:
     """
     Remove IP from blocklist set.
-
+    If the IP is already gone (timeout or previously removed),
+    ignore the nft error.
     nft: sudo nft delete element inet firewall blocklist4 { 1.2.3.4 }
     """
     cmd = (
@@ -59,8 +60,13 @@ def unblock_ip(src_ip: str) -> None:
         f"{{ {src_ip} }}"
     )
     print("[nft] running:", f"sudo nft {cmd}")
-    _run_nft(cmd)
-
+    try:
+        _run_nft(cmd)
+    except RuntimeError as e:
+        if "No such file or directory" in str(e):
+            print("[nft] IP not present in set anymore.")
+        else:
+            raise
 
 def list_blocklist(raw: bool = False):
     """
@@ -68,6 +74,7 @@ def list_blocklist(raw: bool = False):
 
     If raw=True -> return plain nft output.
     Else -> parse into list of dicts: [{'ip': '1.2.3.4', 'timeout': '294s'}, ...]
+        [{'ip': '1.2.3.4', 'timeout': '1m', 'expires': '40s608ms'}, ...]
     """
     out = _run_nft(
         f"list set {NFT_SET_FAMILY} {NFT_SET_TABLE} {NFT_SET_NAME}"
@@ -76,16 +83,13 @@ def list_blocklist(raw: bool = False):
     if raw:
         return out
 
-    # crude parser; enough for typical nft output:
-    # elements = { 1.2.3.4 timeout 294s, 5.6.7.8, ... }
     elements = []
     m = re.search(r"elements\s*=\s*{(.*?)}", out, re.S)
     if not m:
         return elements
 
     body = m.group(1)
-    # split by comma, each chunk may look like:
-    # " 1.2.3.4 timeout 294s" or " 5.6.7.8 "
+
     for chunk in body.split(","):
         chunk = chunk.strip()
         if not chunk:
@@ -93,10 +97,18 @@ def list_blocklist(raw: bool = False):
         parts = chunk.split()
         ip = parts[0]
         timeout = None
+        expires = None
+
         if "timeout" in parts:
             idx = parts.index("timeout")
             if idx + 1 < len(parts):
                 timeout = parts[idx + 1]
-        elements.append({"ip": ip, "timeout": timeout})
+
+        if "expires" in parts:
+            idx = parts.index("expires")
+            if idx + 1 < len(parts):
+                expires = parts[idx + 1]
+
+        elements.append({"ip": ip, "timeout": timeout, "expires": expires})
 
     return elements

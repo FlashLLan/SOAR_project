@@ -74,7 +74,7 @@ def cmd_engine(args):
 def cmd_alerts(args):
     conn = get_db()
     query = (
-        "SELECT id, timestamp, src_ip, signature_id, signature, action "
+        "SELECT id, timestamp, src_ip, signature_id, signature "
         "FROM alerts"
     )
     where = []
@@ -107,10 +107,13 @@ def cmd_alerts(args):
         return
 
     for r in rows:
+        cols = r.keys()
+        sig_id = r["signature_id"] if "signature_id" in cols else "-"
         print(
             f"[{r['id']}] {r['timestamp']} src={r['src_ip']} "
-            f"sig_id={r['signature_id']} action={r['action']}"
+            f"sig_id={sig_id}"
         )
+
         # keep signature text on its own line to stay short
         sig = r["signature"] or ""
         sig = textwrap.shorten(sig, width=100, placeholder="…")
@@ -125,11 +128,12 @@ def cmd_blocklist(args):
         if not entries:
             print("Blocklist is empty.")
             return
-        print(f"{'IP':<18}  TIMEOUT")
-        print("-" * 30)
+        print(f"{'IP':<18}  {'EXPIRES':<12} {'TIMEOUT':<8}")
+        print("-" * 45)
         for e in entries:
-            t = e["timeout"] or "-"
-            print(f"{e['ip']:<18}  {t}")
+            expires = e.get("expires") or "-"
+            timeout = e.get("timeout") or "-"
+            print(f"{e['ip']:<18}  {expires:<12}  {timeout:<8}")
     elif args.action == "add":
         duration = args.duration or 300
         print(
