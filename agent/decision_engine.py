@@ -1,3 +1,4 @@
+import sqlite3
 import time
 import yaml
 from collector import db
@@ -22,6 +23,9 @@ def process_batch(conn):
     for row in rows:
         result = run_playbooks(conn, row)
         print(f"[decision] alert_id={row['id']} -> {result}")
+
+        db.mark_alert_processed(conn, row["id"], result)
+
         count += 1
 
     return count
@@ -33,10 +37,19 @@ def main_loop():
     conn = db.init_db(DB_PATH)
 
     while True:
-        processed = process_batch(conn)
+        try:
+            processed = process_batch(conn)
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e):
+                print("[decision] DB is locked, retrying in 1s...")
+                time.sleep(1)
+                continue
+            else:
+                # future errors
+                raise
 
         if processed == 0:
-            # Nothing to do → relax to reduce CPU load
+            # Nothing to do, relax to reduce CPU load
             time.sleep(2)
         else:
             # If many alerts are incoming, process again quickly
