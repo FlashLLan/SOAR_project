@@ -7,16 +7,18 @@ import subprocess
 import sys
 import re
 from typing import Optional
-
+import json
 import nft
+
+SOAR_VERSION = "1.3.0-cli"
 
 
 PROJECT_ROOT = "/root/soar-agent"
 ENGINE_SCRIPT = os.path.join(PROJECT_ROOT, "decision_engine.py")
 
 DB_PATH = os.environ.get("SOAR_DB_PATH", "/root/soar-agent/alerts.db")
-
 NFT_CONF_PATH = os.environ.get("SOAR_NFT_PATH", "/etc/nftables.conf")
+EVE_PATH = os.environ.get("SOAR_EVE_PATH", "/var/log/suricata/eve.json")
 
 
 # ---------- DB helpers ----------
@@ -107,8 +109,19 @@ def cmd_engine(args):
     if args.action == "status":
         verbose = getattr(args, "verbose", False)
 
-        print("SOAR Engine Status")
-        print("------------------")
+        # Collect everything in a dict first
+        status = {
+            "engine_running": False,
+            "pids": [],
+            "db_path": DB_PATH,
+            "nft_conf_path": NFT_CONF_PATH,
+            "alerts": None,
+            "alerts_error": None,
+            "last_alert": None,
+            "blocklist_size": None,
+            "blocklist_sample": [],
+            "blocklist_error": None,
+        }
 
         # Check if engine is running
         try:
@@ -120,23 +133,11 @@ def cmd_engine(args):
 
         if out:
             lines = out.splitlines()
-            first_pid = lines[0].split()[0]
-            print(f"Engine process : RUNNING (PID {first_pid})")
-            if verbose and len(lines) > 1:
-                print("Other matches  :")
-                for ln in lines[1:]:
-                    print(f"  {ln}")
+            pids = [ln.split()[0] for ln in lines]
+            status["engine_running"] = True
+            status["pids"] = pids
         else:
-            print("Engine process : NOT RUNNING")
-
-        # Always show paths
-        print(f"SQLite DB path : {DB_PATH}")
-        print(f"nftables.conf  : {NFT_CONF_PATH}")
-
-        if not verbose:
-            return
-
-        print("\n--- Engine / DB / blocklist stats ---")
+            status["engine_running"] = False
 
         # Alert stats
         if os.path.exists(DB_PATH):
@@ -156,9 +157,11 @@ def cmd_engine(args):
                     "SELECT COUNT(*) FROM alerts WHERE status='processed'"
                 ).fetchone()[0]
 
-                print(f"Alerts total   : {total}")
-                print(f"Pending alerts : {pending}")
-                print(f"Processed      : {processed}")
+                status["alerts"] = {
+                    "total": total,
+                    "pending": pending,
+                    "processed": processed,
+                }
 
                 last = cur.execute(
                     "SELECT id, timestamp, src_ip, signature_id "
@@ -166,29 +169,78 @@ def cmd_engine(args):
                 ).fetchone()
 
                 if last:
-                    print(
-                        "Last alert     : "
-                        f"id={last['id']} time={last['timestamp']} "
-                        f"src={last['src_ip']} sid={last['signature_id']}"
-                    )
+                    status["last_alert"] = {
+                        "id": last["id"],
+                        "timestamp": last["timestamp"],
+                        "src_ip": last["src_ip"],
+                        "signature_id": last["signature_id"],
+                    }
 
             except sqlite3.Error as e:
-                print(f"Alert stats    : unavailable ({e})")
+                status["alerts_error"] = str(e)
         else:
-            print("Alert stats    : DB file not found")
+            status["alerts_error"] = "DB file not found"
 
         # Blocklist stats
         try:
             entries = nft.list_blocklist()
             count = len(entries)
-            print(f"Blocklist size : {count}")
-            if count:
-                sample = ", ".join(e["ip"] for e in entries[:3])
-                if count > 3:
+            status["blocklist_size"] = count
+            status["blocklist_sample"] = [e["ip"] for e in entries[:3]]
+        except Exception as e:
+            status["blocklist_error"] = str(e)
+
+        # ---- JSON mode? ----
+        if getattr(args, "json", False):
+            print(json.dumps(status, indent=2))
+            return
+
+        # ---- Human readable output (what you had before, using status[]) ----
+        print("SOAR Engine Status")
+        print("------------------")
+
+        if status["engine_running"]:
+            first_pid = status["pids"][0]
+            print(f"Engine process : RUNNING (PID {first_pid})")
+            if verbose and len(status["pids"]) > 1:
+                print("Other matches  :")
+                for pid in status["pids"][1:]:
+                    print(f"  {pid}")
+        else:
+            print("Engine process : NOT RUNNING")
+
+        print(f"SQLite DB path : {status['db_path']}")
+        print(f"nftables.conf  : {status['nft_conf_path']}")
+
+        if not verbose:
+            return
+
+        print("\n--- Engine / DB / blocklist stats ---")
+
+        if status["alerts"]:
+            print(f"Alerts total   : {status['alerts']['total']}")
+            print(f"Pending alerts : {status['alerts']['pending']}")
+            print(f"Processed      : {status['alerts']['processed']}")
+        else:
+            print(f"Alert stats    : unavailable ({status['alerts_error']})")
+
+        if status["last_alert"]:
+            la = status["last_alert"]
+            print(
+                "Last alert     : "
+                f"id={la['id']} time={la['timestamp']} "
+                f"src={la['src_ip']} sid={la['signature_id']}"
+            )
+
+        if status["blocklist_size"] is not None:
+            print(f"Blocklist size : {status['blocklist_size']}")
+            if status["blocklist_sample"]:
+                sample = ", ".join(status["blocklist_sample"])
+                if status["blocklist_size"] > len(status["blocklist_sample"]):
                     sample += ", …"
                 print(f"Sample IPs     : {sample}")
-        except Exception as e:
-            print(f"Blocklist      : stats unavailable ({e})")
+        else:
+            print(f"Blocklist      : stats unavailable ({status['blocklist_error']})")
 
         return
 
@@ -237,6 +289,8 @@ def cmd_engine(args):
 
 def cmd_alerts(args):
     conn = get_db()
+    as_json = getattr(args, "json", False)
+
     query = (
         "SELECT id, timestamp, src_ip, signature_id, signature "
         "FROM alerts"
@@ -266,56 +320,84 @@ def cmd_alerts(args):
         params.append(args.last)
 
     rows = conn.execute(query, params).fetchall()
+
+    if as_json:
+        print(json.dumps([dict(r) for r in rows], indent=2))
+    return
+
     if not rows:
         print("No matching alerts.")
-        return
+    return
 
     for r in rows:
-        cols = r.keys()
-        sig_id = r["signature_id"] if "signature_id" in cols else "-"
+        sig_id = r["signature_id"] if "signature_id" in r.keys() else "-"
         print(
-            f"[{r['id']}] {r['timestamp']} src={r['src_ip']} "
-            f"sig_id={sig_id}"
-        )
+           f"[{r['id']}] {r['timestamp']} "
+           f"src={r['src_ip']} sig_id={sig_id}"
+    )
 
         # keep signature text on its own line to stay short
         sig = r["signature"] or ""
         sig = textwrap.shorten(sig, width=100, placeholder="…")
         print(f"    {sig}")
 
-
 # ---------- blocklist subcommand ----------
 
 def cmd_blocklist(args):
+    as_json = getattr(args, "json", False)
+
     if args.action == "show":
         entries = nft.list_blocklist()
+
+        if as_json:
+            print(json.dumps(entries, indent=2))
+            return
+
         if not entries:
             print("Blocklist is empty.")
             return
+
         print(f"{'IP':<18}  {'EXPIRES':<12} {'TIMEOUT':<8}")
         print("-" * 45)
         for e in entries:
             expires = e.get("expires") or "-"
             timeout = e.get("timeout") or "-"
             print(f"{e['ip']:<18}  {expires:<12}  {timeout:<8}")
+        return
+
     elif args.action == "add":
         duration = args.duration or 300
-        print(
+        if as_json:
+            print(json.dumps(
+                {"status": "OK", "action": "add",
+                 "ip": args.ip, "duration": duration},
+                indent=2,
+            ))
+        else: print(
             f"Blocking {args.ip} for {duration} seconds "
             f"via nftables blocklist4…"
         )
         nft.block_ip(args.ip, duration)
         print("Done.")
     elif args.action == "remove":
-        print(f"Unblocking {args.ip} from nftables blocklist4…")
         nft.unblock_ip(args.ip)
-        print("Done.")
+        if as_json:
+            print(json.dumps({"status": "OK", "action": "remove", "ip": args.ip}, indent=2))
+        else:
+            print(f"Unblocking {args.ip} from nftables blocklist4…")
+            print("Done.")
+        return
 
     elif args.action == "clear":
-        print("Flushing all entries from nftables blocklist4…")
         nft.clear_blocklist()
-        print("Done.")
-
+        if as_json:
+            print(json.dumps(
+                {"status": "OK", "action": "clear"},
+                indent=2,
+            ))
+        else:
+            print("Flushing all entries from nftables blocklist4…")
+            print("Done.")
     else:
         raise SystemExit("Unknown blocklist action")
 
@@ -328,7 +410,7 @@ def _insert_rollback(conn, alert_id: Optional[int], src_ip: str, reason: str):
     )
     conn.commit()
 
-def _show_rollbacks(conn, limit: int):
+def _show_rollbacks(conn, limit: int, as_json: bool = False):
     rows = conn.execute(
         """
         SELECT
@@ -348,7 +430,15 @@ def _show_rollbacks(conn, limit: int):
     ).fetchall()
 
     if not rows:
-        print("No rollbacks recorded yet.")
+        if as_json:
+            print("[]")
+        else:
+            print("No rollbacks recorded yet.")
+        return
+
+    if as_json:
+        out = [dict(r) for r in rows]
+        print(json.dumps(out, indent=2))
         return
 
     for r in rows:
@@ -370,10 +460,11 @@ def _show_rollbacks(conn, limit: int):
 
 def cmd_rollback(args):
     conn = get_db()
+    as_json = getattr(args, "json", False)
 
     # 1) If --last is given, just show history and exit
     if args.last:
-        _show_rollbacks(conn, args.last)
+        _show_rollbacks(conn, args.last, as_json=as_json)
         return
 
     # 2) Normal rollback path: require exactly one of --ip / --alert-id
@@ -399,19 +490,28 @@ def cmd_rollback(args):
         alert_id = None
 
     # nftables rollback
-    print(f"Rolling back: removing {src_ip} from blocklist4…")
     nft.unblock_ip(src_ip)
-    print("nftables updated.")
 
     # log to rollbacks table
     _insert_rollback(conn, alert_id, src_ip, args.reason)
-    print("Rollback logged to rollbacks table.")
 
+    if as_json:
+        print(json.dumps({
+            "status": "OK",
+            "ip": src_ip,
+            "alert_id": alert_id,
+            "reason": args.reason,
+        }, indent=2))
+    else:
+        print(f"Rolling back: removing {src_ip} from blocklist4…")
+        print("nftables updated.")
+        print("Rollback logged to rollbacks table.")
 
 # ---------- ifaces subcommand ----------
 
 def cmd_ifaces(args):
     conf_path = args.conf or NFT_CONF_PATH
+    as_json = getattr(args, "json", False)
 
     try:
         text = _read_nft_conf(conf_path)
@@ -420,6 +520,9 @@ def cmd_ifaces(args):
 
     if args.action == "show":
         mapping = _parse_ifaces(text)
+        if as_json:
+            print(json.dumps(mapping, indent=2))
+            return
         if not mapping:
             print(f"No define WAN/LAN/DMZ lines found in {conf_path}")
             return
@@ -449,6 +552,16 @@ def cmd_ifaces(args):
             return
 
         _write_nft_conf(conf_path, updated)
+        if as_json:
+            mapping = _parse_ifaces(updated)
+            print(json.dumps(
+                {"conf": conf_path,
+                 "changes": changes,
+                 "mapping": mapping},
+                indent=2,
+            ))
+            return
+
         print(f"Updated nftables interface defines in {conf_path}:")
         for c in changes:
             print(f"  {c}")
@@ -459,45 +572,174 @@ def cmd_ifaces(args):
     else:
         raise SystemExit("Unknown ifaces action")
 
+# -----------version----------------
+
+def cmd_version(args):
+    """Print SOAR CLI / agent version."""
+    if getattr(args, "json", False):
+        print(json.dumps({"version": SOAR_VERSION}, indent=2))
+    else:
+        print(f"SOAR lab router CLI version {SOAR_VERSION}")
+
+# ----------- help fucntion for self-check------------
+def find_engine_pid() -> Optional[str]:
+    """Return PID of decision_engine.py or None if not running."""
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-af", "decision_engine.py"], text=True
+        ).strip()
+    except subprocess.CalledProcessError:
+        return None
+
+    if not out:
+        return None
+
+    first_line = out.splitlines()[0]
+    return first_line.split()[0]
+
+# ----------- self-check------------
+
+def cmd_test(args):
+    """
+    Basic health checks:
+      - SQLite DB reachable
+      - eve.json readable
+      - nftables blocklist set exists
+      - decision_engine.py running or not
+    """
+    checks = []
+    overall = "OK"
+
+    # DB check
+    db_result = {"component": "database"}
+    try:
+        st = os.stat(DB_PATH)
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM alerts")
+        total = c.fetchone()[0]
+        conn.close()
+        db_result["status"] = "OK"
+        db_result["detail"] = f"alerts.db reachable ({total} alerts)"
+    except Exception as e:
+        db_result["status"] = "FAIL"
+        db_result["detail"] = f"{e}"
+        overall = "FAIL"
+    checks.append(db_result)
+
+    # eve.json check
+    eve_result = {"component": "eve.json"}
+    try:
+        with open(EVE_PATH, "r") as f:
+            first = f.readline()
+        if first.strip():
+            eve_result["status"] = "OK"
+            eve_result["detail"] = f"readable, first line looks like JSON"
+        else:
+            eve_result["status"] = "WARN"
+            eve_result["detail"] = "file is empty"
+            if overall != "FAIL":
+                overall = "WARN"
+    except Exception as e:
+        eve_result["status"] = "FAIL"
+        eve_result["detail"] = f"{e}"
+        overall = "FAIL"
+    checks.append(eve_result)
+
+    # nftables blocklist set
+    nft_result = {"component": "nftables blocklist"}
+    try:
+        entries = nft.list_blocklist()
+        nft_result["status"] = "OK"
+        nft_result["detail"] = f"set exists ({len(entries)} entries)"
+    except Exception as e:
+        nft_result["status"] = "FAIL"
+        nft_result["detail"] = f"{e}"
+        overall = "FAIL"
+    checks.append(nft_result)
+
+    # engine running?
+    engine_result = {"component": "decision_engine"}
+    pid = find_engine_pid()
+    if pid:
+        engine_result["status"] = "OK"
+        engine_result["detail"] = f"running (PID {pid})"
+    else:
+        engine_result["status"] = "WARN"
+        engine_result["detail"] = "not running"
+        if overall != "FAIL":
+            overall = "WARN"
+    checks.append(engine_result)
+
+    if getattr(args, "json", False):
+        print(json.dumps({"overall": overall, "checks": checks}, indent=2))
+        return
+
+    print("SOAR self-test")
+    print("--------------")
+    for c in checks:
+        print(f"[{c['status']}] {c['component']}: {c['detail']}")
+    print(f"\nOverall: {overall}")
+
 
 # ---------- parse wiring ----------
 
 def build_parser():
+    description = (
+        "SOAR operator CLI for your lab router.\n\n"
+        "Use this tool to control the decision engine, inspect Suricata\n"
+        "alerts, manage the dynamic nftables blocklist, and undo blocks\n"
+        "(rollback) when you confirm a false positive."
+    )
+
+    epilog = textwrap.dedent(
+        """
+        Examples:
+          # Engine
+          soarctl engine status
+          soarctl engine status -v
+          soarctl --json engine status
+
+          # Alerts
+          soarctl alerts --last 20
+          soarctl --json alerts --last 5
+          soarctl alerts --signature-id 9002001
+          soarctl alerts --src-ip 192.168.130.136
+
+          # Blocklist / rollback
+          soarctl blocklist show
+          soarctl --json blocklist show
+          soarctl blocklist add 192.168.130.136 --duration 600
+          soarctl rollback --alert-id 123 --reason "false positive"
+          soarctl --json rollback --last 5
+
+          # nftables interface defines
+          soarctl ifaces show
+          soarctl --json ifaces show
+          soarctl ifaces set --wan eth-wan --lan eth-lan --dmz eth-dmz
+
+          # Version / self-test
+          soarctl version
+          soarctl --json version
+          soarctl test
+          soarctl --json test
+        """
+    )
+
     parser = argparse.ArgumentParser(
         prog="soarctl",
-        description=(
-            "SOAR operator CLI for your lab router.\n\n"
-            "Use this tool to control the decision engine, inspect Suricata\n"
-            "alerts, manage the dynamic nftables blocklist, and undo blocks\n"
-            "(rollback) when you confirm a false positive."
-        ),
+        description=description,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent(
-            """\
-            Examples:
-              # Engine
-              soarctl engine status -v
-              soarctl engine start --silent
-              soarctl engine stop
-
-              # Alerts
-              soarctl alerts --last 20
-              soarctl alerts --signature-id 9002001
-              soarctl alerts --src-ip 192.168.130.136
-
-              # Blocklist / rollback
-              soarctl blocklist show
-              soarctl blocklist clear
-              soarctl blocklist add 192.168.130.136 --duration 600
-              soarctl rollback --alert-id 123 --reason "false positive"
-              soarctl rollback --ip 192.168.130.136 --reason "testing"
- 
-              # nftables interface defines
-              soarctl ifaces show
-              soarctl ifaces set --wan eth-wan --lan eth-lan --dmz eth-dmz
-            """
-        ),
+        epilog=epilog,
     )
+
+    # global flags
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="output machine-readable JSON (where supported)",
+    )
+
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
     # engine
@@ -639,6 +881,16 @@ def build_parser():
     p_if_set.add_argument("--lan", help="interface name for LAN")
     p_if_set.add_argument("--dmz", help="interface name for DMZ")
     p_if_set.set_defaults(func=cmd_ifaces)
+
+    # version
+    p_ver = subparsers.add_parser("version", help="show SOAR/CLI version")
+    p_ver.set_defaults(func=cmd_version)
+
+    # test
+    p_test = subparsers.add_parser(
+        "test", help="run basic health checks (DB, eve.json, nftables, engine)"
+    )
+    p_test.set_defaults(func=cmd_test)
 
     return parser
 
