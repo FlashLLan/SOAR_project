@@ -323,20 +323,16 @@ def cmd_alerts(args):
 
     if as_json:
         print(json.dumps([dict(r) for r in rows], indent=2))
-    return
+        return
 
     if not rows:
         print("No matching alerts.")
-    return
+        return
 
     for r in rows:
         sig_id = r["signature_id"] if "signature_id" in r.keys() else "-"
-        print(
-           f"[{r['id']}] {r['timestamp']} "
-           f"src={r['src_ip']} sig_id={sig_id}"
-    )
+        print(f"[{r['id']}] {r['timestamp']} src={r['src_ip']} sig_id={sig_id}")
 
-        # keep signature text on its own line to stay short
         sig = r["signature"] or ""
         sig = textwrap.shorten(sig, width=100, placeholder="…")
         print(f"    {sig}")
