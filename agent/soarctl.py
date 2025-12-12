@@ -101,7 +101,16 @@ def _set_iface(text: str, name: str, value: str) -> str:
 # ---------- engine subcommand ----------
 
 def cmd_engine(args):
+    """Engine subcommand: status / start / stop."""
+
+    # ----- STATUS -----
     if args.action == "status":
+        verbose = getattr(args, "verbose", False)
+
+        print("SOAR Engine Status")
+        print("------------------")
+
+        # Check if engine is running
         try:
             out = subprocess.check_output(
                 ["pgrep", "-af", "decision_engine.py"], text=True
@@ -109,14 +118,83 @@ def cmd_engine(args):
         except subprocess.CalledProcessError:
             out = ""
 
-        if not out:
-            print("decision_engine.py is NOT running")
+        if out:
+            lines = out.splitlines()
+            first_pid = lines[0].split()[0]
+            print(f"Engine process : RUNNING (PID {first_pid})")
+            if verbose and len(lines) > 1:
+                print("Other matches  :")
+                for ln in lines[1:]:
+                    print(f"  {ln}")
         else:
-            print("decision_engine.py is running:")
-            print(out)
+            print("Engine process : NOT RUNNING")
 
+        # Always show paths
+        print(f"SQLite DB path : {DB_PATH}")
+        print(f"nftables.conf  : {NFT_CONF_PATH}")
+
+        if not verbose:
+            return
+
+        print("\n--- Engine / DB / blocklist stats ---")
+
+        # Alert stats
+        if os.path.exists(DB_PATH):
+            try:
+                conn = get_db()
+                cur = conn.cursor()
+
+                total = cur.execute(
+                    "SELECT COUNT(*) FROM alerts"
+                ).fetchone()[0]
+
+                pending = cur.execute(
+                    "SELECT COUNT(*) FROM alerts WHERE status='new'"
+                ).fetchone()[0]
+
+                processed = cur.execute(
+                    "SELECT COUNT(*) FROM alerts WHERE status='processed'"
+                ).fetchone()[0]
+
+                print(f"Alerts total   : {total}")
+                print(f"Pending alerts : {pending}")
+                print(f"Processed      : {processed}")
+
+                last = cur.execute(
+                    "SELECT id, timestamp, src_ip, signature_id "
+                    "FROM alerts ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+
+                if last:
+                    print(
+                        "Last alert     : "
+                        f"id={last['id']} time={last['timestamp']} "
+                        f"src={last['src_ip']} sid={last['signature_id']}"
+                    )
+
+            except sqlite3.Error as e:
+                print(f"Alert stats    : unavailable ({e})")
+        else:
+            print("Alert stats    : DB file not found")
+
+        # Blocklist stats
+        try:
+            entries = nft.list_blocklist()
+            count = len(entries)
+            print(f"Blocklist size : {count}")
+            if count:
+                sample = ", ".join(e["ip"] for e in entries[:3])
+                if count > 3:
+                    sample += ", …"
+                print(f"Sample IPs     : {sample}")
+        except Exception as e:
+            print(f"Blocklist      : stats unavailable ({e})")
+
+        return
+
+    # ----- START -----
     elif args.action == "start":
-        engine_path = "/root/soar-agent/decision_engine.py"
+        engine_path = ENGINE_SCRIPT
 
         if args.silent:
             # background mode
@@ -132,9 +210,8 @@ def cmd_engine(args):
             print("Starting decision engine (foreground mode)…")
             subprocess.call(["python3", engine_path])
 
-
+    # ----- STOP -----
     elif args.action == "stop":
-        # find running engine process
         try:
             out = subprocess.check_output(
                 ["pgrep", "-f", "decision_engine.py"], text=True
@@ -146,7 +223,6 @@ def cmd_engine(args):
             print("decision_engine.py is NOT running")
             return
 
-        # pgrep may return multiple PIDs
         pids = out.splitlines()
         for pid in pids:
             print(f"Stopping decision engine process {pid}…")
@@ -389,7 +465,38 @@ def cmd_ifaces(args):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="soarctl",
-        description="SOAR operator CLI (engine, alerts, blocklist, rollback).",
+        description=(
+            "SOAR operator CLI for your lab router.\n\n"
+            "Use this tool to control the decision engine, inspect Suricata\n"
+            "alerts, manage the dynamic nftables blocklist, and undo blocks\n"
+            "(rollback) when you confirm a false positive."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent(
+            """\
+            Examples:
+              # Engine
+              soarctl engine status -v
+              soarctl engine start --silent
+              soarctl engine stop
+
+              # Alerts
+              soarctl alerts --last 20
+              soarctl alerts --signature-id 9002001
+              soarctl alerts --src-ip 192.168.130.136
+
+              # Blocklist / rollback
+              soarctl blocklist show
+              soarctl blocklist clear
+              soarctl blocklist add 192.168.130.136 --duration 600
+              soarctl rollback --alert-id 123 --reason "false positive"
+              soarctl rollback --ip 192.168.130.136 --reason "testing"
+ 
+              # nftables interface defines
+              soarctl ifaces show
+              soarctl ifaces set --wan eth-wan --lan eth-lan --dmz eth-dmz
+            """
+        ),
     )
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
@@ -401,10 +508,16 @@ def build_parser():
     p_engine_status = p_engine_sub.add_parser(
         "status", help="show if decision_engine.py is running"
     )
+    p_engine_status.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="include DB and blocklist statistics in status output",
+    )
     p_engine_status.set_defaults(func=cmd_engine)
-    
+ 
     p_engine_start = p_engine_sub.add_parser(
-        "start", help="start decision engine (stub)"
+        "start", help="start decision engine"
     )
     p_engine_start.add_argument(
         "--silent",
