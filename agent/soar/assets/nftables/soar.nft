@@ -1,0 +1,50 @@
+#
+# --- SOAR-owned (dynamic response) ---
+#
+table inet soar {
+
+  # SOAR-managed sets (moved from inet firewall)
+  set whitelist4 {
+    type ipv4_addr
+    flags interval
+    comment "SOAR: always-allow source IPs"
+    #attackers 192.168.130.136 is temp excluded.
+    elements = { 192.168.16.1 }
+  }
+
+  set blocklist4 {
+    type ipv4_addr
+    flags timeout
+    timeout 30d
+    comment "SOAR: source IPs to drop with per-element timeout"
+  }
+
+  # Optional: egress denylist (destinations to block)
+  set egress_block4 {
+    type ipv4_addr
+    flags interval
+    timeout 30d
+    comment "SOAR: destination IPs to block on egress"
+  }
+
+  chain input_guard {
+    type filter hook input priority -50; policy accept;
+
+    # whitelist first
+    ip saddr @whitelist4 accept
+
+    # blocklist
+    ip saddr @blocklist4 drop
+  }
+
+  chain forward_guard {
+    type filter hook forward priority -50; policy accept;
+
+    # whitelist first
+    ip saddr @whitelist4 accept
+
+    # Reactive blocks
+    ip saddr @blocklist4 counter drop            comment "SOAR: blocked src"
+    ip daddr @egress_block4 counter drop         comment "SOAR: blocked dst (egress kill)"
+  }
+}

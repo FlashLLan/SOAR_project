@@ -92,6 +92,70 @@ def _set_iface(text: str, name: str, value: str) -> str:
         new_text = "\n".join(lines) + "\n"
     return new_text
 
+# --- soar init ---
+def cmd_init(args):
+    """
+    Install SOAR nftables integration:
+      - copy repo SOAR rules -> /etc/nftables.d/soar.nft
+      - ensure include "/etc/nftables.d/*.nft" exists in /etc/nftables.conf
+      - reload nftables
+      - verify table inet soar exists
+    """
+    include_line = 'include "/etc/nftables.d/*.nft"'
+    src_soar_nft = os.path.join(
+        os.path.dirname(__file__), "assets", "nftables", "soar.nft"
+    )
+    dst_dir = "/etc/nftables.d"
+    dst_soar_nft = os.path.join(dst_dir, "soar.nft")
+
+    # Need root
+    if os.geteuid() != 0:
+        raise SystemExit("Run as root (sudo) for init")
+
+    if not os.path.exists(src_soar_nft):
+        raise SystemExit(f"Missing source SOAR nft file: {src_soar_nft}")
+
+    os.makedirs(dst_dir, exist_ok=True)
+
+    # Copy SOAR nft file
+    subprocess.check_call(["cp", "-f", src_soar_nft, dst_soar_nft])
+    print(f"[init] Installed {dst_soar_nft}")
+
+    # Ensure include exists in /etc/nftables.conf
+    with open(NFT_CONF_PATH, "r") as f:
+        conf = f.read()
+
+    if include_line not in conf:
+        # Backup once
+        backup = NFT_CONF_PATH + ".bak"
+        subprocess.check_call(["cp", "-f", NFT_CONF_PATH, backup])
+        print(f"[init] Backed up {NFT_CONF_PATH} -> {backup}")
+
+        # Insert include near top (after flush ruleset if found)
+        lines = conf.splitlines()
+        insert_at = 0
+        for i, ln in enumerate(lines):
+            if ln.strip().startswith("flush ruleset"):
+                insert_at = i + 1
+                break
+        lines.insert(insert_at, include_line)
+        lines.insert(insert_at + 1, "")
+        with open(NFT_CONF_PATH, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+        print(f"[init] Added include line to {NFT_CONF_PATH}")
+    else:
+        print(f"[init] Include line already present in {NFT_CONF_PATH}")
+
+    # Reload nftables (reload preferred, restart fallback)
+    subprocess.call(["systemctl", "reload", "nftables"])
+    subprocess.call(["systemctl", "restart", "nftables"])
+
+    # Verify
+    r = subprocess.run(["nft", "list", "table", "inet", "soar"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit("[init] ERROR: table inet soar not found after reload")
+    print("[init] OK: table inet soar is loaded")
 
 # ---------- engine subcommand ----------
 
@@ -543,6 +607,7 @@ def cmd_ifaces(args):
             return
 
         _write_nft_conf(conf_path, updated)
+        subprocess.check_call(["cp", "-f", conf_path, conf_path + ".bak"])
         if as_json:
             mapping = _parse_ifaces(updated)
             print(json.dumps(
@@ -557,7 +622,8 @@ def cmd_ifaces(args):
         for c in changes:
             print(f"  {c}")
         print("\nRemember to reload nftables, for example:")
-        print(f"  sudo nft -f {conf_path}")
+        print("\nReloading nftables safely:")
+        print("  sudo systemctl reload nftables || sudo systemctl restart nftables")
         return
 
     else:
@@ -737,6 +803,12 @@ def build_parser():
     )
 
     subparsers = parser.add_subparsers(dest="cmd", required=True)
+
+
+    # init
+    p_init = subparsers.add_parser("init", help="install SOAR nftables integration")
+    p_init.set_defaults(func=cmd_init)
+
 
     # engine
     p_engine = subparsers.add_parser("engine", help="engine control")

@@ -3,7 +3,7 @@ import shlex
 import re
 
 NFT_SET_FAMILY = "inet"
-NFT_SET_TABLE = "firewall"
+NFT_SET_TABLE = "soar"
 NFT_SET_NAME = "blocklist4"
 
 
