@@ -18,4 +18,5 @@ venv/
 alerts.db*
 
 # SOAR build leftovers
+*.bak
 *.SOARPKG.bak
