@@ -1,7 +1,10 @@
 from datetime import datetime, timedelta
 
-from collector import db      # SQLite helpers live in collector/db.py
-import nft    
+from soar.collector import db
+from soar.firewall import nft
+
+#from collector import db      # SQLite helpers live in collector/db.py
+#import nft    
 # Default block durations (you can tune these)
 SSH_BLOCK_SEC   = 600         # 10 min
 ICMP_BLOCK_SEC  = 300         # 5  min

@@ -8,7 +8,7 @@ from .db import insert_alert
 def tail_file(path):
     """Generator that yields new lines as they appear."""
     with open(path, "r") as f:
-        f.seek(0, os.SEEK_END)  # go to end
+        f.seek(0, os.SEEK_END) 
         while True:
             line = f.readline()
             if not line:

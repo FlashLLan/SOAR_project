@@ -6,29 +6,25 @@ import textwrap
 import subprocess
 import sys
 import re
+import pkgutil
 from typing import Optional
 import json
-import nft
+from soar.firewall import nft
+from soar.config import load_config
+from importlib.resources import files
+from pathlib import Path
 
 SOAR_VERSION = "1.3.0-cli"
 
-
-PROJECT_ROOT = "/root/soar-agent"
-ENGINE_SCRIPT = os.path.join(PROJECT_ROOT, "decision_engine.py")
-
-DB_PATH = os.environ.get("SOAR_DB_PATH", "/root/soar-agent/alerts.db")
-NFT_CONF_PATH = os.environ.get("SOAR_NFT_PATH", "/etc/nftables.conf")
-EVE_PATH = os.environ.get("SOAR_EVE_PATH", "/var/log/suricata/eve.json")
-
+NFT_CONF_PATH = "/etc/nftables.conf"
 
 # ---------- DB helpers ----------
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
+def get_db(db_path: str):
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     ensure_schema(conn)
     return conn
-
 
 def ensure_schema(conn):
     # only rollbacks; alerts table already exists
@@ -99,12 +95,100 @@ def _set_iface(text: str, name: str, value: str) -> str:
         new_text = "\n".join(lines) + "\n"
     return new_text
 
+# --- helpers for init ---
+def _require_root(action: str) -> None:
+    if os.geteuid() != 0:
+        raise SystemExit(f"Run as root (sudo) for {action}")
+
+def _write_pkg_asset(rel_path: str, dst_path: str) -> None:
+    """
+    Read an asset from the installed package and write it to dst_path.
+    Works even if 'soar' is treated as a namespace package.
+    rel_path example: "nftables/soar.nft"
+    """
+    data = pkgutil.get_data("soar", f"assets/{rel_path}")
+    if data is None:
+        raise FileNotFoundError(f"assets/{rel_path} not found in package data")
+
+    dst = Path(dst_path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(data)
+
+
+# --- soar init ---
+def cmd_init(args):
+    """
+    Install SOAR nftables integration:
+      - install packaged SOAR rules -> /etc/nftables.d/soar.nft
+      - ensure include "/etc/nftables.d/*.nft" exists in /etc/nftables.conf
+      - reload nftables
+      - verify table inet soar exists
+    """
+    include_line = 'include "/etc/nftables.d/*.nft"'
+    dst_dir = "/etc/nftables.d"
+    dst_soar_nft = os.path.join(dst_dir, "soar.nft")
+
+    _require_root("init")
+
+    # 1) Install SOAR nft file from *package data*
+    try:
+        _write_pkg_asset("nftables/soar.nft", dst_soar_nft)
+    except FileNotFoundError:
+        raise SystemExit("[init] Missing packaged asset: soar/assets/nftables/soar.nft")
+    print(f"[init] Installed {dst_soar_nft}")
+
+    # 2) Ensure include exists in /etc/nftables.conf
+    try:
+        conf = _read_nft_conf(NFT_CONF_PATH)
+    except FileNotFoundError:
+        raise SystemExit(f"[init] ERROR: {NFT_CONF_PATH} not found")
+
+    if include_line not in conf:
+        backup = NFT_CONF_PATH + ".bak"
+        if not os.path.exists(backup):
+            subprocess.check_call(["cp", "-f", NFT_CONF_PATH, backup])
+            print(f"[init] Backed up {NFT_CONF_PATH} -> {backup}")
+
+        lines = conf.splitlines()
+        insert_at = 0
+        for i, ln in enumerate(lines):
+            if ln.strip().startswith("flush ruleset"):
+                insert_at = i + 1
+                break
+
+        lines.insert(insert_at, include_line)
+        lines.insert(insert_at + 1, "")
+        _write_nft_conf(NFT_CONF_PATH, "\n".join(lines) + "\n")
+        print(f"[init] Added include line to {NFT_CONF_PATH}")
+    else:
+        print(f"[init] Include line already present in {NFT_CONF_PATH}")
+
+    # 3) Reload nftables (reload first, restart only if reload fails)
+    rc = subprocess.call(["systemctl", "reload", "nftables"])
+    if rc != 0:
+        subprocess.check_call(["systemctl", "restart", "nftables"])
+
+    # 4) Verify
+    r = subprocess.run(
+        ["nft", "list", "table", "inet", "soar"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        # show nft error output to help debug (syntax, include issues, etc.)
+        err = (r.stderr or "").strip()
+        if err:
+            raise SystemExit(f"[init] ERROR: table inet soar not found after reload: {err}")
+        raise SystemExit("[init] ERROR: table inet soar not found after reload")
+    print("[init] OK: table inet soar is loaded")
+
 
 # ---------- engine subcommand ----------
 
 def cmd_engine(args):
     """Engine subcommand: status / start / stop."""
-
+    cfg = load_config()
+    db_path = cfg.database_path
     # ----- STATUS -----
     if args.action == "status":
         verbose = getattr(args, "verbose", False)
@@ -113,8 +197,7 @@ def cmd_engine(args):
         status = {
             "engine_running": False,
             "pids": [],
-            "db_path": DB_PATH,
-            "nft_conf_path": NFT_CONF_PATH,
+            "db_path": db_path,
             "alerts": None,
             "alerts_error": None,
             "last_alert": None,
@@ -126,7 +209,7 @@ def cmd_engine(args):
         # Check if engine is running
         try:
             out = subprocess.check_output(
-                ["pgrep", "-af", "decision_engine.py"], text=True
+                ["pgrep", "-af", "soar.decision.engine"], text=True
             ).strip()
         except subprocess.CalledProcessError:
             out = ""
@@ -140,9 +223,9 @@ def cmd_engine(args):
             status["engine_running"] = False
 
         # Alert stats
-        if os.path.exists(DB_PATH):
+        if os.path.exists(db_path):
             try:
-                conn = get_db()
+                conn = get_db(db_path)
                 cur = conn.cursor()
 
                 total = cur.execute(
@@ -210,7 +293,6 @@ def cmd_engine(args):
             print("Engine process : NOT RUNNING")
 
         print(f"SQLite DB path : {status['db_path']}")
-        print(f"nftables.conf  : {status['nft_conf_path']}")
 
         if not verbose:
             return
@@ -246,13 +328,12 @@ def cmd_engine(args):
 
     # ----- START -----
     elif args.action == "start":
-        engine_path = ENGINE_SCRIPT
 
         if args.silent:
             # background mode
             print("Starting decision engine in background mode…")
             subprocess.Popen(
-                ["python3", engine_path],
+                [sys.executable, "-m", "soar.decision.engine"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -260,13 +341,15 @@ def cmd_engine(args):
         else:
             # foreground mode
             print("Starting decision engine (foreground mode)…")
-            subprocess.call(["python3", engine_path])
+            subprocess.call([sys.executable, "-m", "soar.decision.engine"])
+
+
 
     # ----- STOP -----
     elif args.action == "stop":
         try:
             out = subprocess.check_output(
-                ["pgrep", "-f", "decision_engine.py"], text=True
+                ["pgrep", "-af", "soar.decision.engine"], text=True
             ).strip()
         except subprocess.CalledProcessError:
             out = ""
@@ -275,7 +358,8 @@ def cmd_engine(args):
             print("decision_engine.py is NOT running")
             return
 
-        pids = out.splitlines()
+        lines = out.splitlines()
+        pids = [ln.split()[0] for ln in lines]
         for pid in pids:
             print(f"Stopping decision engine process {pid}…")
             subprocess.call(["kill", pid])
@@ -288,7 +372,8 @@ def cmd_engine(args):
 # ---------- alerts subcommand ----------
 
 def cmd_alerts(args):
-    conn = get_db()
+    cfg = load_config()
+    conn = get_db(cfg.database_path)
     as_json = getattr(args, "json", False)
 
     query = (
@@ -455,7 +540,8 @@ def _show_rollbacks(conn, limit: int, as_json: bool = False):
 
 
 def cmd_rollback(args):
-    conn = get_db()
+    cfg = load_config()
+    conn = get_db(cfg.database_path)
     as_json = getattr(args, "json", False)
 
     # 1) If --last is given, just show history and exit
@@ -548,6 +634,7 @@ def cmd_ifaces(args):
             return
 
         _write_nft_conf(conf_path, updated)
+        subprocess.check_call(["cp", "-f", conf_path, conf_path + ".bak"])
         if as_json:
             mapping = _parse_ifaces(updated)
             print(json.dumps(
@@ -562,7 +649,8 @@ def cmd_ifaces(args):
         for c in changes:
             print(f"  {c}")
         print("\nRemember to reload nftables, for example:")
-        print(f"  sudo nft -f {conf_path}")
+        print("\nReloading nftables safely:")
+        print("  sudo systemctl reload nftables || sudo systemctl restart nftables")
         return
 
     else:
@@ -582,7 +670,7 @@ def find_engine_pid() -> Optional[str]:
     """Return PID of decision_engine.py or None if not running."""
     try:
         out = subprocess.check_output(
-            ["pgrep", "-af", "decision_engine.py"], text=True
+            ["pgrep", "-af", "soar.decision.engine"], text=True
         ).strip()
     except subprocess.CalledProcessError:
         return None
@@ -603,20 +691,25 @@ def cmd_test(args):
       - nftables blocklist set exists
       - decision_engine.py running or not
     """
+
+    cfg = load_config()
+    db_path = cfg.database_path
+    eve_path = cfg.eve_log_path
+
     checks = []
     overall = "OK"
 
     # DB check
     db_result = {"component": "database"}
     try:
-        st = os.stat(DB_PATH)
-        conn = sqlite3.connect(DB_PATH)
+        os.stat(db_path)
+        conn = sqlite3.connect(db_path)
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM alerts")
         total = c.fetchone()[0]
         conn.close()
         db_result["status"] = "OK"
-        db_result["detail"] = f"alerts.db reachable ({total} alerts)"
+        db_result["detail"] = f"db reachable ({total} alerts)"
     except Exception as e:
         db_result["status"] = "FAIL"
         db_result["detail"] = f"{e}"
@@ -626,11 +719,11 @@ def cmd_test(args):
     # eve.json check
     eve_result = {"component": "eve.json"}
     try:
-        with open(EVE_PATH, "r") as f:
+        with open(eve_path, "r") as f:
             first = f.readline()
         if first.strip():
             eve_result["status"] = "OK"
-            eve_result["detail"] = f"readable, first line looks like JSON"
+            eve_result["detail"] = "readable, first line looks like JSON"
         else:
             eve_result["status"] = "WARN"
             eve_result["detail"] = "file is empty"
@@ -738,6 +831,12 @@ def build_parser():
 
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
+
+    # init
+    p_init = subparsers.add_parser("init", help="install SOAR nftables integration")
+    p_init.set_defaults(func=cmd_init)
+
+
     # engine
     p_engine = subparsers.add_parser("engine", help="engine control")
     p_engine_sub = p_engine.add_subparsers(
@@ -753,7 +852,7 @@ def build_parser():
         help="include DB and blocklist statistics in status output",
     )
     p_engine_status.set_defaults(func=cmd_engine)
- 
+
     p_engine_start = p_engine_sub.add_parser(
         "start", help="start decision engine"
     )
@@ -860,7 +959,6 @@ def build_parser():
     )
     p_if.add_argument(
         "--conf",
-        default=NFT_CONF_PATH,
         help=f"path to nftables.conf (default: {NFT_CONF_PATH})",
     )
     p_if_sub = p_if.add_subparsers(dest="action", required=True)
