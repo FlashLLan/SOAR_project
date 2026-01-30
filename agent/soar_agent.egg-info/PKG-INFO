@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: soar-agent
+Version: 0.1.0
+Summary: Lightweight SOAR agent for Suricata + nftables
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: pyyaml
+
+# SOAR Agent
+
+Install (editable):
+`pip install -e .`
+
+CLI:
+`soarctl --help`

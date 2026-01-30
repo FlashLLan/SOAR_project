@@ -18,5 +18,9 @@ soarctl = "soar.cli:main"
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["soar*"]
+
 [tool.setuptools.package-data]
-"soar" = ["assets/nftables/*.nft"]
+soar = ["assets/**/*"]

@@ -3,7 +3,7 @@ import time
 import os
 
 from .models import parse_alert
-from .db import insert_alert
+from soar.db import insert_alert
 
 def tail_file(path):
     """Generator that yields new lines as they appear."""

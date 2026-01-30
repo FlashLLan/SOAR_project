@@ -6,10 +6,13 @@ import textwrap
 import subprocess
 import sys
 import re
+import pkgutil
 from typing import Optional
 import json
 from soar.firewall import nft
 from soar.config import load_config
+from importlib.resources import files
+from pathlib import Path
 
 SOAR_VERSION = "1.3.0-cli"
 
@@ -92,70 +95,93 @@ def _set_iface(text: str, name: str, value: str) -> str:
         new_text = "\n".join(lines) + "\n"
     return new_text
 
+# --- helpers for init ---
+def _require_root(action: str) -> None:
+    if os.geteuid() != 0:
+        raise SystemExit(f"Run as root (sudo) for {action}")
+
+def _write_pkg_asset(rel_path: str, dst_path: str) -> None:
+    """
+    Read an asset from the installed package and write it to dst_path.
+    Works even if 'soar' is treated as a namespace package.
+    rel_path example: "nftables/soar.nft"
+    """
+    data = pkgutil.get_data("soar", f"assets/{rel_path}")
+    if data is None:
+        raise FileNotFoundError(f"assets/{rel_path} not found in package data")
+
+    dst = Path(dst_path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(data)
+
+
 # --- soar init ---
 def cmd_init(args):
     """
     Install SOAR nftables integration:
-      - copy repo SOAR rules -> /etc/nftables.d/soar.nft
+      - install packaged SOAR rules -> /etc/nftables.d/soar.nft
       - ensure include "/etc/nftables.d/*.nft" exists in /etc/nftables.conf
       - reload nftables
       - verify table inet soar exists
     """
     include_line = 'include "/etc/nftables.d/*.nft"'
-    src_soar_nft = os.path.join(
-        os.path.dirname(__file__), "assets", "nftables", "soar.nft"
-    )
     dst_dir = "/etc/nftables.d"
     dst_soar_nft = os.path.join(dst_dir, "soar.nft")
 
-    # Need root
-    if os.geteuid() != 0:
-        raise SystemExit("Run as root (sudo) for init")
+    _require_root("init")
 
-    if not os.path.exists(src_soar_nft):
-        raise SystemExit(f"Missing source SOAR nft file: {src_soar_nft}")
-
-    os.makedirs(dst_dir, exist_ok=True)
-
-    # Copy SOAR nft file
-    subprocess.check_call(["cp", "-f", src_soar_nft, dst_soar_nft])
+    # 1) Install SOAR nft file from *package data*
+    try:
+        _write_pkg_asset("nftables/soar.nft", dst_soar_nft)
+    except FileNotFoundError:
+        raise SystemExit("[init] Missing packaged asset: soar/assets/nftables/soar.nft")
     print(f"[init] Installed {dst_soar_nft}")
 
-    # Ensure include exists in /etc/nftables.conf
-    with open(NFT_CONF_PATH, "r") as f:
-        conf = f.read()
+    # 2) Ensure include exists in /etc/nftables.conf
+    try:
+        conf = _read_nft_conf(NFT_CONF_PATH)
+    except FileNotFoundError:
+        raise SystemExit(f"[init] ERROR: {NFT_CONF_PATH} not found")
 
     if include_line not in conf:
-        # Backup once
         backup = NFT_CONF_PATH + ".bak"
-        subprocess.check_call(["cp", "-f", NFT_CONF_PATH, backup])
-        print(f"[init] Backed up {NFT_CONF_PATH} -> {backup}")
+        if not os.path.exists(backup):
+            subprocess.check_call(["cp", "-f", NFT_CONF_PATH, backup])
+            print(f"[init] Backed up {NFT_CONF_PATH} -> {backup}")
 
-        # Insert include near top (after flush ruleset if found)
         lines = conf.splitlines()
         insert_at = 0
         for i, ln in enumerate(lines):
             if ln.strip().startswith("flush ruleset"):
                 insert_at = i + 1
                 break
+
         lines.insert(insert_at, include_line)
         lines.insert(insert_at + 1, "")
-        with open(NFT_CONF_PATH, "w") as f:
-            f.write("\n".join(lines) + "\n")
-
+        _write_nft_conf(NFT_CONF_PATH, "\n".join(lines) + "\n")
         print(f"[init] Added include line to {NFT_CONF_PATH}")
     else:
         print(f"[init] Include line already present in {NFT_CONF_PATH}")
 
-    # Reload nftables (reload preferred, restart fallback)
-    subprocess.call(["systemctl", "reload", "nftables"])
-    subprocess.call(["systemctl", "restart", "nftables"])
+    # 3) Reload nftables (reload first, restart only if reload fails)
+    rc = subprocess.call(["systemctl", "reload", "nftables"])
+    if rc != 0:
+        subprocess.check_call(["systemctl", "restart", "nftables"])
 
-    # Verify
-    r = subprocess.run(["nft", "list", "table", "inet", "soar"], capture_output=True, text=True)
+    # 4) Verify
+    r = subprocess.run(
+        ["nft", "list", "table", "inet", "soar"],
+        capture_output=True,
+        text=True,
+    )
     if r.returncode != 0:
+        # show nft error output to help debug (syntax, include issues, etc.)
+        err = (r.stderr or "").strip()
+        if err:
+            raise SystemExit(f"[init] ERROR: table inet soar not found after reload: {err}")
         raise SystemExit("[init] ERROR: table inet soar not found after reload")
     print("[init] OK: table inet soar is loaded")
+
 
 # ---------- engine subcommand ----------
 
@@ -307,7 +333,7 @@ def cmd_engine(args):
             # background mode
             print("Starting decision engine in background mode…")
             subprocess.Popen(
-                ["python3", "-m", "soar.decision.engine"],
+                [sys.executable, "-m", "soar.decision.engine"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -315,7 +341,8 @@ def cmd_engine(args):
         else:
             # foreground mode
             print("Starting decision engine (foreground mode)…")
-            subprocess.call(["python3", "-m", "soar.decision.engine"])
+            subprocess.call([sys.executable, "-m", "soar.decision.engine"])
+
 
 
     # ----- STOP -----

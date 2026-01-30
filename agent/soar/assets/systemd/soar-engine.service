@@ -1,0 +1,18 @@
+[Unit]
+Description=SOAR Decision Engine
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=SOAR_CONFIG_PATH=/etc/soar/soar.yaml
+ExecStart=/home/user/SOAR_project_github/venv/bin/soarctl engine start --silent
+Restart=on-failure
+RestartSec=2
+
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
