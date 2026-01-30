@@ -16,3 +16,6 @@ venv/
 *.db-shm
 *.db-wal
 alerts.db*
+
+# SOAR build leftovers
+*.SOARPKG.bak
